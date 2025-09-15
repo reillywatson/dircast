@@ -105,6 +105,7 @@ func main() {
 				}
 
 				downloadURL := strings.Replace(sharedLink, "www.dropbox.com", "dl.dropboxusercontent.com", 1)
+				downloadURL = strings.Replace(downloadURL, "dl=0", "dl=1", 1)
 
 				/*
 					duration, err := getAudioDurationFromDropbox(dbxf, file.PathLower)
