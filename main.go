@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -65,25 +68,39 @@ type FFProbeOutput struct {
 }
 
 func main() {
-	if _, err := exec.LookPath("ffprobe"); err != nil {
-		log.Fatal("ffprobe not found in PATH. Please install ffmpeg.")
-	}
+	//if _, err := exec.LookPath("ffprobe"); err != nil {
+	//	log.Fatal("ffprobe not found in PATH. Please install ffmpeg.")
+	//}
 
-	if len(os.Args) < 5 {
-		fmt.Println("Usage: go run main.go <dropboxToken> <dropboxPath> <baseURL> <imageURL>")
+	if len(os.Args) < 4 { // dropboxPath, baseURL, imageURL
+		fmt.Println("Usage: go run main.go <dropboxPath> <baseURL> <imageURL>")
+		fmt.Println("Refresh token must be set via environment variable DROPBOX_REFRESH_TOKEN or will prompt with interactive flow if unset.")
 		os.Exit(1)
 	}
-	dropboxToken := os.Args[1]
-	dropboxPath := os.Args[2]
-	baseURL := os.Args[3]
-	imageURL := os.Args[4]
+	dropboxPath := os.Args[1]
+	baseURL := os.Args[2]
+	imageURL := os.Args[3]
+
+	refreshToken := os.Getenv("DROPBOX_REFRESH_TOKEN")
+	if refreshToken == "" || refreshToken == "-" {
+		var err error
+		refreshToken, err = interactiveAuthFlow()
+		if err != nil {
+			log.Fatalf("OAuth flow failed: %v", err)
+		}
+		log.Printf("Obtained refresh token. Store this securely and set DROPBOX_REFRESH_TOKEN to avoid interactive prompts: %s", refreshToken)
+	}
 
 	// Remove trailing slash from dropbox path
 	dropboxPath = strings.TrimSuffix(dropboxPath, "/")
 
-	config := dropbox.Config{
-		Token: dropboxToken,
+	// Exchange refresh token for short-lived access token
+	accessToken, err := fetchAccessToken(refreshToken)
+	if err != nil {
+		log.Fatalf("Failed to obtain access token: %v", err)
 	}
+
+	config := dropbox.Config{Token: accessToken}
 	dbxf := files.New(config)
 	dbxs := sharing.New(config)
 
@@ -233,4 +250,106 @@ func formatDuration(d time.Duration) string {
 	d -= m * time.Minute
 	s := d / time.Second
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+// interactiveAuthFlow launches an authorization flow if no refresh token was provided.
+// It prints the authorize URL, waits for the user to paste the code, then exchanges it.
+func interactiveAuthFlow() (string, error) {
+	appKey := os.Getenv("DROPBOX_APP_KEY")
+	appSecret := os.Getenv("DROPBOX_APP_SECRET")
+	if appKey == "" || appSecret == "" {
+		return "", fmt.Errorf("missing DROPBOX_APP_KEY or DROPBOX_APP_SECRET in environment")
+	}
+	// 'code' flow recommended for server-side obtaining refresh token
+	authorizeURL := fmt.Sprintf("https://www.dropbox.com/oauth2/authorize?response_type=code&token_access_type=offline&client_id=%s", url.QueryEscape(appKey))
+	fmt.Println("Open this URL in your browser, authorize the app, then paste the returned code here:")
+	fmt.Println(authorizeURL)
+	fmt.Print("Authorization code: ")
+	var code string
+	if _, err := fmt.Scanln(&code); err != nil {
+		return "", fmt.Errorf("reading authorization code: %w", err)
+	}
+	// Exchange code for tokens
+	form := url.Values{}
+	form.Set("code", code)
+	form.Set("grant_type", "authorization_code")
+	req, err := http.NewRequest("POST", "https://api.dropbox.com/oauth2/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(appKey, appSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token endpoint returned %s: %s", resp.Status, string(body))
+	}
+	var tr struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return "", fmt.Errorf("decode token JSON: %w", err)
+	}
+	if tr.RefreshToken == "" {
+		return "", fmt.Errorf("no refresh_token in response; ensure 'token_access_type=offline' was used")
+	}
+	return tr.RefreshToken, nil
+}
+
+// fetchAccessToken exchanges a long-lived refresh token for a short-lived access token.
+// Requires environment variables DROPBOX_APP_KEY and DROPBOX_APP_SECRET to be set.
+func fetchAccessToken(refreshToken string) (string, error) {
+	appKey := os.Getenv("DROPBOX_APP_KEY")
+	appSecret := os.Getenv("DROPBOX_APP_SECRET")
+	if appKey == "" || appSecret == "" {
+		return "", fmt.Errorf("missing DROPBOX_APP_KEY or DROPBOX_APP_SECRET in environment")
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+
+	req, err := http.NewRequest("POST", "https://api.dropbox.com/oauth2/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(appKey, appSecret)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read token response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token endpoint returned %s: %s", resp.Status, string(body))
+	}
+
+	var tr struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int    `json:"expires_in"`
+		Scope       string `json:"scope"`
+		UID         string `json:"uid"`
+		AccountID   string `json:"account_id"`
+	}
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return "", fmt.Errorf("decode token JSON: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return "", fmt.Errorf("empty access_token in response")
+	}
+	return tr.AccessToken, nil
 }
