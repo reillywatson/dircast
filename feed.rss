@@ -5,5 +5,12 @@
     <description>It&#39;s Reilly&#39;s Podcast, Baby!</description>
     <itunes:author>Reilly Watson</itunes:author>
     <itunes:image href="https://justcast.sfo2.digitaloceanspaces.com/js-production/1647481331315-reilly%20copy.jpeg"></itunes:image>
+    <item>
+      <title>01 Robert A. Caro - Robert Moses.mp3</title>
+      <link>https://dl.dropboxusercontent.com/scl/fi/hxxo9574x6ia33xdhcwkk/01-Robert-A.-Caro-Robert-Moses.mp3?rlkey=7cxfb1zgrfubgmjv619qah75v&amp;dl=1</link>
+      <guid>https://dl.dropboxusercontent.com/scl/fi/hxxo9574x6ia33xdhcwkk/01-Robert-A.-Caro-Robert-Moses.mp3?rlkey=7cxfb1zgrfubgmjv619qah75v&amp;dl=1</guid>
+      <pubDate>Sun, 25 Jan 2026 05:32:06 +0000</pubDate>
+      <enclosure url="https://dl.dropboxusercontent.com/scl/fi/hxxo9574x6ia33xdhcwkk/01-Robert-A.-Caro-Robert-Moses.mp3?rlkey=7cxfb1zgrfubgmjv619qah75v&amp;dl=1" length="212217256" type="audio/mpeg"></enclosure>
+    </item>
   </channel>
 </rss>
