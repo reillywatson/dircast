@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,11 @@ type FFProbeOutput struct {
 	} `json:"format"`
 }
 
+const (
+	maxRetries = 3
+	retryDelay = 2 * time.Second
+)
+
 func main() {
 	//if _, err := exec.LookPath("ffprobe"); err != nil {
 	//	log.Fatal("ffprobe not found in PATH. Please install ffmpeg.")
@@ -88,7 +94,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("OAuth flow failed: %v", err)
 		}
-		log.Printf("Obtained refresh token. Store this securely and set DROPBOX_REFRESH_TOKEN to avoid interactive prompts: %s", refreshToken)
+		log.Printf("Obtained refresh token. Store it securely and set DROPBOX_REFRESH_TOKEN to avoid interactive prompts.")
 	}
 
 	// Remove trailing slash from dropbox path
@@ -104,54 +110,14 @@ func main() {
 	dbxf := files.New(config)
 	dbxs := sharing.New(config)
 
-	listFolderArg := files.NewListFolderArg(dropboxPath)
-	listFolderResult, err := dbxf.ListFolder(listFolderArg)
+	audioFiles, err := listAudioFiles(dbxf, dropboxPath)
 	if err != nil {
-		log.Fatalf("Failed to list files in Dropbox: %s", err)
+		log.Fatalf("Failed to list files in Dropbox: %v", err)
 	}
 
-	var items []Item
-	for _, entry := range listFolderResult.Entries {
-		if file, ok := entry.(*files.FileMetadata); ok {
-			fileName := file.Name
-			if strings.HasSuffix(fileName, ".mp3") || strings.HasSuffix(fileName, ".m4a") || strings.HasSuffix(fileName, ".m4b") {
-				sharedLink, err := getOrCreateSharedLink(dbxs, file.PathLower)
-				if err != nil {
-					log.Printf("Failed to create or get shared link for %s: %s", fileName, err)
-					continue
-				}
-
-				downloadURL := strings.Replace(sharedLink, "www.dropbox.com", "dl.dropboxusercontent.com", 1)
-				downloadURL = strings.Replace(downloadURL, "dl=0", "dl=1", 1)
-
-				/*
-					duration, err := getAudioDurationFromDropbox(dbxf, file.PathLower)
-					if err != nil {
-						log.Printf("Failed to get duration for %s: %s", fileName, err)
-					}*/
-
-				enclosureType := ""
-				if strings.HasSuffix(fileName, ".mp3") {
-					enclosureType = "audio/mpeg"
-				} else {
-					enclosureType = "audio/x-m4a"
-				}
-
-				item := Item{
-					Title:   fileName,
-					Link:    downloadURL,
-					GUID:    downloadURL,
-					PubDate: file.ServerModified.Format("Mon, 02 Jan 2006 15:04:05 -0700"),
-					Enclosure: Enclosure{
-						URL:    downloadURL,
-						Length: int64(file.Size),
-						Type:   enclosureType,
-					},
-					//ItunesDuration: formatDuration(duration),
-				}
-				items = append(items, item)
-			}
-		}
+	items, err := buildItems(dbxs, audioFiles)
+	if err != nil {
+		log.Fatalf("Failed to build feed items: %v", err)
 	}
 
 	rss := RSS{
@@ -177,27 +143,189 @@ func main() {
 	fmt.Println(string(xmlData))
 }
 
+func listAudioFiles(dbxf files.Client, dropboxPath string) ([]*files.FileMetadata, error) {
+	listFolderArg := files.NewListFolderArg(dropboxPath)
+	listFolderResult, err := withRetry("list Dropbox folder", func() (*files.ListFolderResult, error) {
+		return dbxf.ListFolder(listFolderArg)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var audioFiles []*files.FileMetadata
+	appendAudioFiles(&audioFiles, listFolderResult.Entries)
+
+	for listFolderResult.HasMore {
+		continueArg := files.NewListFolderContinueArg(listFolderResult.Cursor)
+		listFolderResult, err = withRetry("continue Dropbox folder listing", func() (*files.ListFolderResult, error) {
+			return dbxf.ListFolderContinue(continueArg)
+		})
+		if err != nil {
+			return nil, err
+		}
+		appendAudioFiles(&audioFiles, listFolderResult.Entries)
+	}
+
+	sort.Slice(audioFiles, func(i, j int) bool {
+		if audioFiles[i].ServerModified.Equal(audioFiles[j].ServerModified) {
+			leftName := strings.ToLower(audioFiles[i].Name)
+			rightName := strings.ToLower(audioFiles[j].Name)
+			if leftName == rightName {
+				return audioFiles[i].PathLower < audioFiles[j].PathLower
+			}
+			return leftName < rightName
+		}
+		return audioFiles[i].ServerModified.Before(audioFiles[j].ServerModified)
+	})
+
+	return audioFiles, nil
+}
+
+func appendAudioFiles(dst *[]*files.FileMetadata, entries []files.IsMetadata) {
+	for _, entry := range entries {
+		file, ok := entry.(*files.FileMetadata)
+		if !ok || !isAudioFile(file.Name) {
+			continue
+		}
+		*dst = append(*dst, file)
+	}
+}
+
+func isAudioFile(fileName string) bool {
+	lowerName := strings.ToLower(fileName)
+	return strings.HasSuffix(lowerName, ".mp3") ||
+		strings.HasSuffix(lowerName, ".m4a") ||
+		strings.HasSuffix(lowerName, ".m4b")
+}
+
+func buildItems(dbxs sharing.Client, audioFiles []*files.FileMetadata) ([]Item, error) {
+	items := make([]Item, 0, len(audioFiles))
+	for _, file := range audioFiles {
+		sharedLink, err := getOrCreateSharedLink(dbxs, file.PathLower)
+		if err != nil {
+			return nil, fmt.Errorf("get shared link for %s: %w", file.Name, err)
+		}
+
+		downloadURL := sharedLinkToDownloadURL(sharedLink)
+		enclosureType := "audio/x-m4a"
+		if strings.HasSuffix(strings.ToLower(file.Name), ".mp3") {
+			enclosureType = "audio/mpeg"
+		}
+
+		items = append(items, Item{
+			Title:   file.Name,
+			Link:    downloadURL,
+			GUID:    downloadURL,
+			PubDate: file.ServerModified.Format("Mon, 02 Jan 2006 15:04:05 -0700"),
+			Enclosure: Enclosure{
+				URL:    downloadURL,
+				Length: int64(file.Size),
+				Type:   enclosureType,
+			},
+			//ItunesDuration: formatDuration(duration),
+		})
+	}
+
+	return items, nil
+}
+
 func getOrCreateSharedLink(dbxs sharing.Client, path string) (string, error) {
-	arg := sharing.NewCreateSharedLinkArg(path)
-	link, err := dbxs.CreateSharedLink(arg)
+	sharedLink, found, err := lookupDirectSharedLink(dbxs, path)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return sharedLink, nil
+	}
+
+	createArg := sharing.NewCreateSharedLinkWithSettingsArg(path)
+	link, err := withRetry("create shared link", func() (sharing.IsSharedLinkMetadata, error) {
+		return dbxs.CreateSharedLinkWithSettings(createArg)
+	})
 	if err != nil {
 		apiError, ok := err.(dropbox.APIError)
 		if ok && strings.HasPrefix(apiError.ErrorSummary, "shared_link_already_exists") {
-			listArg := sharing.NewListSharedLinksArg()
-			listArg.Path = path
-			links, err := dbxs.ListSharedLinks(listArg)
-			if err != nil {
-				return "", err
+			sharedLink, found, listErr := lookupDirectSharedLink(dbxs, path)
+			if listErr != nil {
+				return "", listErr
 			}
-			if len(links.Links) > 0 {
-				if sl, ok := links.Links[0].(*sharing.SharedLinkMetadata); ok {
-					return sl.Url, nil
-				}
+			if found {
+				return sharedLink, nil
 			}
 		}
 		return "", err
 	}
-	return link.Url, nil
+
+	return sharedLinkURL(link)
+}
+
+func lookupDirectSharedLink(dbxs sharing.Client, path string) (string, bool, error) {
+	listArg := sharing.NewListSharedLinksArg()
+	listArg.Path = path
+	listArg.DirectOnly = true
+
+	links, err := withRetry("list shared links", func() (*sharing.ListSharedLinksResult, error) {
+		return dbxs.ListSharedLinks(listArg)
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if len(links.Links) == 0 {
+		return "", false, nil
+	}
+
+	url, err := sharedLinkURL(links.Links[0])
+	if err != nil {
+		return "", false, err
+	}
+	return url, true, nil
+}
+
+func sharedLinkURL(link sharing.IsSharedLinkMetadata) (string, error) {
+	sharedLink, ok := link.(*sharing.SharedLinkMetadata)
+	if !ok {
+		return "", fmt.Errorf("unexpected shared link metadata type %T", link)
+	}
+	return sharedLink.Url, nil
+}
+
+func sharedLinkToDownloadURL(sharedLink string) string {
+	parsed, err := url.Parse(sharedLink)
+	if err != nil {
+		downloadURL := strings.Replace(sharedLink, "www.dropbox.com", "dl.dropboxusercontent.com", 1)
+		return strings.Replace(downloadURL, "dl=0", "dl=1", 1)
+	}
+
+	if parsed.Host == "www.dropbox.com" {
+		parsed.Host = "dl.dropboxusercontent.com"
+	}
+	query := parsed.Query()
+	query.Set("dl", "1")
+	parsed.RawQuery = query.Encode()
+
+	return parsed.String()
+}
+
+func withRetry[T any](operation string, fn func() (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		result, err := fn()
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+		if attempt == maxRetries {
+			break
+		}
+
+		log.Printf("%s failed (attempt %d/%d): %v", operation, attempt, maxRetries, err)
+		time.Sleep(time.Duration(attempt) * retryDelay)
+	}
+
+	return zero, fmt.Errorf("%s: %w", operation, lastErr)
 }
 
 func getAudioDurationFromDropbox(dbxf files.Client, path string) (time.Duration, error) {
