@@ -19,6 +19,7 @@ import (
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/sharing"
+	"golang.org/x/oauth2"
 )
 
 // RSS is the root element of the RSS feed
@@ -69,8 +70,9 @@ type FFProbeOutput struct {
 }
 
 const (
-	maxRetries = 3
-	retryDelay = 2 * time.Second
+	defaultHTTPTimeout = 30 * time.Second
+	maxRetries         = 3
+	retryDelay         = 2 * time.Second
 )
 
 func main() {
@@ -87,10 +89,14 @@ func main() {
 	baseURL := os.Args[2]
 	imageURL := os.Args[3]
 
+	httpTimeout, err := configuredDuration("DIRCAST_HTTP_TIMEOUT", defaultHTTPTimeout)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	refreshToken := os.Getenv("DROPBOX_REFRESH_TOKEN")
 	if refreshToken == "" || refreshToken == "-" {
-		var err error
-		refreshToken, err = interactiveAuthFlow()
+		refreshToken, err = interactiveAuthFlow(httpTimeout)
 		if err != nil {
 			log.Fatalf("OAuth flow failed: %v", err)
 		}
@@ -101,12 +107,15 @@ func main() {
 	dropboxPath = strings.TrimSuffix(dropboxPath, "/")
 
 	// Exchange refresh token for short-lived access token
-	accessToken, err := fetchAccessToken(refreshToken)
+	accessToken, err := fetchAccessToken(refreshToken, httpTimeout)
 	if err != nil {
 		log.Fatalf("Failed to obtain access token: %v", err)
 	}
 
-	config := dropbox.Config{Token: accessToken}
+	config := dropbox.Config{
+		Token:  accessToken,
+		Client: newDropboxHTTPClient(accessToken, httpTimeout),
+	}
 	dbxf := files.New(config)
 	dbxs := sharing.New(config)
 
@@ -141,6 +150,36 @@ func main() {
 	}
 
 	fmt.Println(string(xmlData))
+}
+
+func configuredDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s=%q: %w", name, value, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", name)
+	}
+	return duration, nil
+}
+
+func newDropboxHTTPClient(accessToken string, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &oauth2.Transport{
+			Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}),
+			Base:   http.DefaultTransport,
+		},
+	}
+}
+
+func newHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout}
 }
 
 func listAudioFiles(dbxf files.Client, dropboxPath string) ([]*files.FileMetadata, error) {
@@ -282,11 +321,16 @@ func lookupDirectSharedLink(dbxs sharing.Client, path string) (string, bool, err
 }
 
 func sharedLinkURL(link sharing.IsSharedLinkMetadata) (string, error) {
-	sharedLink, ok := link.(*sharing.SharedLinkMetadata)
-	if !ok {
+	switch sharedLink := link.(type) {
+	case *sharing.SharedLinkMetadata:
+		return sharedLink.Url, nil
+	case *sharing.FileLinkMetadata:
+		return sharedLink.Url, nil
+	case *sharing.FolderLinkMetadata:
+		return sharedLink.Url, nil
+	default:
 		return "", fmt.Errorf("unexpected shared link metadata type %T", link)
 	}
-	return sharedLink.Url, nil
 }
 
 func sharedLinkToDownloadURL(sharedLink string) string {
@@ -382,7 +426,7 @@ func formatDuration(d time.Duration) string {
 
 // interactiveAuthFlow launches an authorization flow if no refresh token was provided.
 // It prints the authorize URL, waits for the user to paste the code, then exchanges it.
-func interactiveAuthFlow() (string, error) {
+func interactiveAuthFlow(httpTimeout time.Duration) (string, error) {
 	appKey := os.Getenv("DROPBOX_APP_KEY")
 	appSecret := os.Getenv("DROPBOX_APP_SECRET")
 	if appKey == "" || appSecret == "" {
@@ -407,7 +451,7 @@ func interactiveAuthFlow() (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(appKey, appSecret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newHTTPClient(httpTimeout).Do(req)
 	if err != nil {
 		return "", fmt.Errorf("token request: %w", err)
 	}
@@ -434,7 +478,7 @@ func interactiveAuthFlow() (string, error) {
 
 // fetchAccessToken exchanges a long-lived refresh token for a short-lived access token.
 // Requires environment variables DROPBOX_APP_KEY and DROPBOX_APP_SECRET to be set.
-func fetchAccessToken(refreshToken string) (string, error) {
+func fetchAccessToken(refreshToken string, httpTimeout time.Duration) (string, error) {
 	appKey := os.Getenv("DROPBOX_APP_KEY")
 	appSecret := os.Getenv("DROPBOX_APP_SECRET")
 	if appKey == "" || appSecret == "" {
@@ -452,7 +496,7 @@ func fetchAccessToken(refreshToken string) (string, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(appKey, appSecret)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newHTTPClient(httpTimeout).Do(req)
 	if err != nil {
 		return "", fmt.Errorf("token request failed: %w", err)
 	}
