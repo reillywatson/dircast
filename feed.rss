@@ -5,5 +5,12 @@
     <description>It&#39;s Reilly&#39;s Podcast, Baby!</description>
     <itunes:author>Reilly Watson</itunes:author>
     <itunes:image href="https://justcast.sfo2.digitaloceanspaces.com/js-production/1647481331315-reilly%20copy.jpeg"></itunes:image>
+    <item>
+      <title>Malcolm Gladwell - The American Way of Killing.mp3</title>
+      <link>https://dl.dropboxusercontent.com/scl/fi/4qxz5p7qznpewm37tq96b/Malcolm-Gladwell-The-American-Way-of-Killing.mp3?dl=1&amp;rlkey=7tc7cwy8ag3cucytfjsu3zexq</link>
+      <guid>https://dl.dropboxusercontent.com/scl/fi/4qxz5p7qznpewm37tq96b/Malcolm-Gladwell-The-American-Way-of-Killing.mp3?dl=1&amp;rlkey=7tc7cwy8ag3cucytfjsu3zexq</guid>
+      <pubDate>Sun, 04 Oct 2026 02:22:12 +0000</pubDate>
+      <enclosure url="https://dl.dropboxusercontent.com/scl/fi/4qxz5p7qznpewm37tq96b/Malcolm-Gladwell-The-American-Way-of-Killing.mp3?dl=1&amp;rlkey=7tc7cwy8ag3cucytfjsu3zexq" length="152702452" type="audio/mpeg"></enclosure>
+    </item>
   </channel>
 </rss>
